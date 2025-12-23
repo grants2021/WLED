@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include <IPAddress.h>
+#include <cmath>
 #ifdef ARDUINO_ARCH_ESP32
 #include "driver/ledc.h"
 #include "soc/ledc_struct.h"
@@ -27,6 +28,8 @@ extern bool useParallelI2S;
 
 //colors.cpp
 uint32_t colorBalanceFromKelvin(uint16_t kelvin, uint32_t rgb);
+// color utilities from colors.cpp
+uint32_t color_blend(uint32_t color1, uint32_t color2, uint16_t blend, bool b16);
 
 //udp.cpp
 uint8_t realtimeBroadcast(uint8_t type, IPAddress client, uint16_t length, byte *buffer, uint8_t bri=255, bool isRGBW=false);
@@ -38,6 +41,48 @@ uint8_t realtimeBroadcast(uint8_t type, IPAddress client, uint16_t length, byte 
 #define G(c) (byte((c) >> 8))
 #define B(c) (byte(c))
 #define W(c) (byte((c) >> 24))
+
+// re-balance helper: when red is dominant, limit green/blue to preserve orange hues
+static inline uint32_t rebalance_red(uint32_t c) {
+  uint8_t r = R(c), g = G(c), b = B(c), w = W(c);
+  // Apply a smooth exponential clamp to other channels when red dominates.
+  // This reduces G/B slowly at first, then more aggressively as R grows,
+  // and finally levels off to a minimum allowed ratio.
+  const int threshold = 25; 
+  if (r > threshold) {
+    const float l = -0.045f;
+    const float m = 25.0f;
+    const float n = 1.5f;
+    const float o = -24.0f;
+    if (g > threshold) {
+      g = static_cast<uint8_t>( l * pow(g - m, n) + o + g);
+    }
+    if (b > threshold) {
+      b = static_cast<uint8_t>( l * pow(b - m, n) + o + b);
+    }
+  }
+    // start stronger clamping after this red value
+    // const float min_ratio = 0.1f;     // minimum allowed ratio of other channels to R (reduced per user)
+    // const float decay = 0.06f;         // decay rate for exponential curve (higher = faster falloff)
+
+    // float ratio = 1.0f;
+    // if (g > threshold) {
+    //   // ratio approaches min_ratio as r increases past threshold
+    //   // ratio = min_ratio + (1.0f - min_ratio) * expf(-decay * (r - threshold));
+    //   g = 0; //static_cast<uint8_t>( min_ratio * (r - threshold) + threshold);
+    // }
+    // } else {
+    //   // gentle reduction below threshold to avoid sudden change
+    //   const float gentle = 0.95f;
+    //   ratio = gentle;
+    // }
+    // uint8_t max_other = static_cast<uint8_t>(ratio * r);
+    // if (max_other > r) max_other = r; // never allow other channels to exceed red
+    // if (g > max_other) g = max_other; // clamp green relative to red
+    // // leave blue unchanged — user reported blue looks correct
+  //}
+  return RGBW32(r, g, b, w);
+}
 
 
 bool ColorOrderMap::add(uint16_t start, uint16_t len, uint8_t colorOrder) {
@@ -294,6 +339,7 @@ void BusDigital::setStatusPixel(uint32_t c) {
 
 void IRAM_ATTR BusDigital::setPixelColor(unsigned pix, uint32_t c) {
   if (!_valid) return;
+  c = rebalance_red(c);
   if (hasWhite()) c = autoWhiteCalc(c);
   if (Bus::_cct >= 1900) c = colorBalanceFromKelvin(Bus::_cct, c); //color correction from CCT
   if (_data) {
@@ -507,6 +553,7 @@ void BusPwm::setPixelColor(unsigned pix, uint32_t c) {
   if (Bus::_cct >= 1900 && (_type == TYPE_ANALOG_3CH || _type == TYPE_ANALOG_4CH)) {
     c = colorBalanceFromKelvin(Bus::_cct, c); //color correction from CCT
   }
+  // c = rebalance_red(c);
   uint8_t r = R(c);
   uint8_t g = G(c);
   uint8_t b = B(c);
@@ -734,6 +781,7 @@ void BusNetwork::setPixelColor(unsigned pix, uint32_t c) {
   if (!_valid || pix >= _len) return;
   if (_hasWhite) c = autoWhiteCalc(c);
   if (Bus::_cct >= 1900) c = colorBalanceFromKelvin(Bus::_cct, c); //color correction from CCT
+  // c = rebalance_red(c);
   unsigned offset = pix * _UDPchannels;
   _data[offset]   = R(c);
   _data[offset+1] = G(c);
